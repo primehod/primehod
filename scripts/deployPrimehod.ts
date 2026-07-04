@@ -1,5 +1,11 @@
 import { ethers, network } from "hardhat";
 
+// Uniswap v3 wiring on Robinhood Chain (audited canonical deployment).
+const V3_FACTORY = "0x1f7d7550B1b028f7571E69A784071F0205FD2EfA";
+const V3_NPM = "0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3";
+const WETH = "0x0bd7d308f8e1639fab988df18a8011f41eacad73";
+
+
 /**
  * Deploys the Primehod launchpad factory to the configured network.
  *
@@ -22,7 +28,7 @@ async function main() {
 
   // owner = deployer, platform fee recipient = deployer (change with setPlatform).
   const Factory = await ethers.getContractFactory("PrimehodFactory");
-  const factory = await Factory.deploy(deployer.address, deployer.address);
+  const factory = await Factory.deploy(deployer.address, deployer.address, V3_FACTORY, V3_NPM, WETH);
   await factory.waitForDeployment();
 
   const addr = await factory.getAddress();
