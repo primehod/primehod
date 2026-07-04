@@ -1,5 +1,11 @@
 import { ethers } from "hardhat";
 
+// Uniswap v3 wiring on Robinhood Chain (audited canonical deployment).
+const V3_FACTORY = "0x1f7d7550B1b028f7571E69A784071F0205FD2EfA";
+const V3_NPM = "0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3";
+const WETH = "0x0bd7d308f8e1639fab988df18a8011f41eacad73";
+
+
 /**
  * Local sanity test for the Primehod launchpad, run on the in-process Hardhat
  * network (no RPC needed):
@@ -13,7 +19,7 @@ async function main() {
   const [owner, creator, buyer] = await ethers.getSigners();
 
   const Factory = await ethers.getContractFactory("PrimehodFactory");
-  const factory = await Factory.deploy(owner.address, owner.address);
+  const factory = await Factory.deploy(owner.address, owner.address, V3_FACTORY, V3_NPM, WETH);
   await factory.waitForDeployment();
 
   // Reference price 1000 USD/ETH so a 5000 USD cap = 5 ETH (graduates within test funds).
