@@ -1,5 +1,11 @@
 import { ethers } from "hardhat";
 
+// Uniswap v3 wiring on Robinhood Chain (audited canonical deployment).
+const V3_FACTORY = "0x1f7d7550B1b028f7571E69A784071F0205FD2EfA";
+const V3_NPM = "0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3";
+const WETH = "0x0bd7d308f8e1639fab988df18a8011f41eacad73";
+
+
 /**
  * Adversarial checks used in the security review. Each block asserts that a known
  * attack path FAILS, so the assertions are the point: if any require here stops
@@ -21,31 +27,31 @@ async function main() {
   const [owner, attacker, victim] = await ethers.getSigners();
 
   const Factory = await ethers.getContractFactory("PrimehodFactory");
-  const factory = await Factory.deploy(owner.address, owner.address);
+  const factory = await Factory.deploy(owner.address, owner.address, V3_FACTORY, V3_NPM, WETH);
   await factory.waitForDeployment();
 
   // Public launch by the attacker (no owner privileges).
   await (await factory.connect(attacker).createToken("Test", "TST", 200, 5000, "")).wait();
   const tokenAddr = (await factory.allTokens(0)) as string;
   const launch = await factory.launchOf(tokenAddr);
-  const curve = await ethers.getContractAt("PrimehodCurve", launch.curve);
+  const curve = await ethers.getContractAt("PrimehodCurve", launch.market);
   const token = await ethers.getContractAt("PrimehodToken", tokenAddr);
 
   console.log("1) Curve solvency: cannot pull more ETH than really raised");
   // Victim buys 1 ETH in.
   await (await curve.connect(victim).buy(0, { value: ethers.parseEther("1") })).wait();
   const raised = await curve.ethRaised();
-  const contractEth = await ethers.provider.getBalance(launch.curve);
+  const contractEth = await ethers.provider.getBalance(launch.market);
   console.log(`   ethRaised=${ethers.formatEther(raised)}  contractBalance=${ethers.formatEther(contractEth)}`);
   // Attacker acquires a mountain of tokens (from the curve itself) then tries to
   // dump far more than the curve can back, aiming to drain the virtual reserve.
   await (await curve.connect(attacker).buy(0, { value: ethers.parseEther("3") })).wait();
   const bal = await token.balanceOf(attacker.address);
-  await (await token.connect(attacker).approve(launch.curve, bal)).wait();
+  await (await token.connect(attacker).approve(launch.market, bal)).wait();
   // Selling the whole stack must never pay out more than real ETH in the pool.
-  const before = await ethers.provider.getBalance(launch.curve);
+  const before = await ethers.provider.getBalance(launch.market);
   await (await curve.connect(attacker).sell(bal, 0)).wait();
-  const after = await ethers.provider.getBalance(launch.curve);
+  const after = await ethers.provider.getBalance(launch.market);
   if (after < 0n) throw new Error("curve went insolvent");
   console.log(`   ok: curve still solvent after max dump (balance ${ethers.formatEther(after)} ETH, drained ${ethers.formatEther(before - after)})`);
 
