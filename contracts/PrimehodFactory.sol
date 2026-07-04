@@ -3,9 +3,12 @@ pragma solidity 0.8.26;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import "./PrimehodToken.sol";
 import "./PrimehodVesting.sol";
 import "./PrimehodCurve.sol";
+import "./PrimehodV3Locker.sol";
+import "./UniV3Interfaces.sol";
 
 /**
  * @title PrimehodFactory
@@ -60,13 +63,28 @@ contract PrimehodFactory is Ownable {
     address[] public distRecipients;
     uint256[] public distBps;
 
+    // Where a token trades: the Primehod bonding curve (dynamic 1-5% fee,
+    // trades on primehod.lol) or a Uniswap v3 pool (fixed 1% fee, visible to
+    // DEX bots and indexers from launch).
+    uint8 public constant VENUE_CURVE = 0;
+    uint8 public constant VENUE_V3 = 1;
+
     struct Launch {
         address token;
-        address curve;
+        address market;    // PrimehodCurve, or the Uniswap v3 pool
         address vesting;   // 0 if the owner-instant path was used
         address creator;
+        address locker;    // v3 venue only: PrimehodV3Locker holding the LP NFT
+        uint8 venue;       // VENUE_CURVE | VENUE_V3
     }
     mapping(address => Launch) public launchOf; // token => Launch
+
+    // ── Uniswap v3 wiring (audited canonical deployment on Robinhood Chain) ──────
+    IUniswapV3FactoryMin public immutable v3Factory;
+    INonfungiblePositionManagerMin public immutable v3Npm;
+    address public immutable weth;
+    uint24 public constant V3_FEE = 10000;      // 1% tier (fixed by the pool)
+    int24 public constant V3_TICK_SPACING = 200; // tick spacing of the 1% tier
     // token => off-chain metadata URI (Irys/Arweave JSON: image, description, links).
     // Empty string is allowed; the UI falls back to a generated identicon.
     mapping(address => string) public metadataOf;
@@ -89,8 +107,18 @@ contract PrimehodFactory is Ownable {
         uint256 baseFeeBps
     );
 
-    constructor(address _owner, address _platform) Ownable(_owner) {
+    constructor(
+        address _owner,
+        address _platform,
+        address _v3Factory,
+        address _v3Npm,
+        address _weth
+    ) Ownable(_owner) {
+        require(_v3Factory != address(0) && _v3Npm != address(0) && _weth != address(0), "zero v3 wiring");
         platform = _platform == address(0) ? _owner : _platform;
+        v3Factory = IUniswapV3FactoryMin(_v3Factory);
+        v3Npm = INonfungiblePositionManagerMin(_v3Npm);
+        weth = _weth;
     }
 
     // ── Owner config ─────────────────────────────────────────────────────────────
@@ -177,11 +205,130 @@ contract PrimehodFactory is Ownable {
         require(initialVirtualEth > 0, "cap too small");
 
         // Full supply is minted to this factory, then split below.
-        PrimehodToken t = new PrimehodToken(name, symbol, DECIMALS, TOTAL_SUPPLY, address(this));
+        PrimehodToken t;
+        address vesting;
+        uint256 marketSupply;
+        (t, vesting, marketSupply) = _mintAndAllocate(name, symbol);
         token = address(t);
 
+        PrimehodCurve c = new PrimehodCurve(
+            token,
+            msg.sender,          // creator
+            platform,
+            marketSupply,
+            initialVirtualEth,   // virtual ETH reserve
+            marketSupply,        // virtual token reserve = curve supply
+            baseFeeBps,
+            dynamicMaxFeeBps,
+            creatorSplitBps,
+            graduationCap
+        );
+        curve = address(c);
+        require(t.transfer(curve, marketSupply), "curve transfer failed");
+
+        launchOf[token] = Launch({
+            token: token, market: curve, vesting: vesting,
+            creator: msg.sender, locker: address(0), venue: VENUE_CURVE
+        });
+        metadataOf[token] = metadataURI;
+        allTokens.push(token);
+
+        emit TokenLaunched(token, msg.sender, curve, vesting, baseFeeBps);
+    }
+
+    /// @notice Launch a token straight into a Uniswap v3 pool (fixed 1% fee tier)
+    ///         instead of the Primehod curve. The non-vested supply is placed as
+    ///         single-sided liquidity in a permanently locked position, so the
+    ///         token is tradeable by anyone — wallets, bots, aggregators — from
+    ///         the first block, and the liquidity can never be pulled.
+    /// @param priceTick The Uniswap tick of the starting price expressed as
+    ///        WETH-per-token (negative for sub-1-ETH prices; the UI derives it
+    ///        from a USD market-cap choice). Orientation per token0/token1
+    ///        ordering is handled here.
+    function createTokenV3(
+        string calldata name,
+        string calldata symbol,
+        int24 priceTick,
+        string calldata metadataURI
+    ) external returns (address token, address pool) {
+        require(priceTick >= -850000 && priceTick <= 0, "price tick out of range");
+
+        PrimehodToken t;
+        address vesting;
+        uint256 marketSupply;
+        (t, vesting, marketSupply) = _mintAndAllocate(name, symbol);
+        token = address(t);
+
+        // Lock the LP fees' destination before the pool exists.
+        PrimehodV3Locker locker = new PrimehodV3Locker(
+            address(v3Npm), msg.sender, platform, creatorSplitBps
+        );
+
+        bool tokenIs0 = token < weth;
+        // Pool price is token1-per-token0. priceTick is WETH-per-token, which is
+        // the pool price when the token is token0, and its inverse otherwise.
+        int24 poolTick = tokenIs0 ? priceTick : -priceTick;
+
+        pool = v3Factory.createPool(token, weth, V3_FEE);
+        IUniswapV3PoolMin(pool).initialize(TickMath.getSqrtPriceAtTick(poolTick));
+
+        // Single-sided token liquidity covering the whole price range above the
+        // starting price: buys move the price into the range, exactly like a
+        // bonding curve, except it lives where every bot can see it.
+        int24 tickLower;
+        int24 tickUpper;
+        if (tokenIs0) {
+            // token0-only requires currentTick < tickLower.
+            tickLower = _alignUp(poolTick + 1);
+            tickUpper = TickMath.MAX_TICK - (TickMath.MAX_TICK % V3_TICK_SPACING);
+        } else {
+            // token1-only requires currentTick >= tickUpper.
+            tickUpper = _alignDown(poolTick);
+            tickLower = -(TickMath.MAX_TICK - (TickMath.MAX_TICK % V3_TICK_SPACING));
+        }
+
+        require(t.approve(address(v3Npm), marketSupply), "approve failed");
+        (uint256 positionId,, uint256 used0, uint256 used1) = v3Npm.mint(
+            INonfungiblePositionManagerMin.MintParams({
+                token0: tokenIs0 ? token : weth,
+                token1: tokenIs0 ? weth : token,
+                fee: V3_FEE,
+                tickLower: tickLower,
+                tickUpper: tickUpper,
+                amount0Desired: tokenIs0 ? marketSupply : 0,
+                amount1Desired: tokenIs0 ? 0 : marketSupply,
+                amount0Min: 0,
+                amount1Min: 0,
+                recipient: address(locker),
+                deadline: block.timestamp
+            })
+        );
+        locker.lock(positionId);
+        uint256 used = tokenIs0 ? used0 : used1;
+        require(used > 0, "no liquidity minted");
+        // Rounding dust the position couldn't take joins the locked fee stream.
+        uint256 leftover = marketSupply - used;
+        if (leftover > 0) require(t.transfer(address(locker), leftover), "dust transfer failed");
+
+        launchOf[token] = Launch({
+            token: token, market: pool, vesting: vesting,
+            creator: msg.sender, locker: address(locker), venue: VENUE_V3
+        });
+        metadataOf[token] = metadataURI;
+        allTokens.push(token);
+
+        emit TokenLaunched(token, msg.sender, pool, vesting, V3_FEE);
+    }
+
+    /// @dev Mint the full supply and carve out the owner-instant or vesting slice;
+    ///      returns what remains for the trading venue.
+    function _mintAndAllocate(string calldata name, string calldata symbol)
+        private
+        returns (PrimehodToken t, address vesting, uint256 marketSupply)
+    {
+        t = new PrimehodToken(name, symbol, DECIMALS, TOTAL_SUPPLY, address(this));
+
         uint256 allocated;
-        address vesting = address(0);
         bool ownerInstant = (msg.sender == owner()) && (distRecipients.length > 0);
 
         if (ownerInstant) {
@@ -198,36 +345,27 @@ contract PrimehodFactory is Ownable {
             uint256 vestAmount = (TOTAL_SUPPLY * vestBps) / 10000;
             uint256 releasePerPeriod = (TOTAL_SUPPLY * vestReleaseBps) / 10000;
             PrimehodVesting v = new PrimehodVesting(
-                token, msg.sender, vestAmount, releasePerPeriod, vestPeriod
+                address(t), msg.sender, vestAmount, releasePerPeriod, vestPeriod
             );
             vesting = address(v);
             allocated += vestAmount;
             require(t.transfer(vesting, vestAmount), "vest transfer failed");
         }
 
-        uint256 curveSupply = TOTAL_SUPPLY - allocated;
-        require(curveSupply > 0, "no curve supply");
+        marketSupply = TOTAL_SUPPLY - allocated;
+        require(marketSupply > 0, "no market supply");
+    }
 
-        PrimehodCurve c = new PrimehodCurve(
-            token,
-            msg.sender,          // creator
-            platform,
-            curveSupply,
-            initialVirtualEth,   // virtual ETH reserve
-            curveSupply,         // virtual token reserve = curve supply
-            baseFeeBps,
-            dynamicMaxFeeBps,
-            creatorSplitBps,
-            graduationCap
-        );
-        curve = address(c);
-        require(t.transfer(curve, curveSupply), "curve transfer failed");
+    function _alignUp(int24 tick) private pure returns (int24) {
+        int24 aligned = (tick / V3_TICK_SPACING) * V3_TICK_SPACING;
+        if (aligned < tick) aligned += V3_TICK_SPACING;
+        return aligned;
+    }
 
-        launchOf[token] = Launch({token: token, curve: curve, vesting: vesting, creator: msg.sender});
-        metadataOf[token] = metadataURI;
-        allTokens.push(token);
-
-        emit TokenLaunched(token, msg.sender, curve, vesting, baseFeeBps);
+    function _alignDown(int24 tick) private pure returns (int24) {
+        int24 aligned = (tick / V3_TICK_SPACING) * V3_TICK_SPACING;
+        if (aligned > tick) aligned -= V3_TICK_SPACING;
+        return aligned;
     }
 
     function tokensCount() external view returns (uint256) {
