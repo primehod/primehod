@@ -1,6 +1,6 @@
 # Primehod — Security Review
 
-_Last updated: 2026-07-04 · Factory `0x5ae4eF8726Bb721735eEc32e40E0c103679f1DA2` (Robinhood Chain mainnet, chainId 4663)_
+_Last updated: 2026-07-04 · Factory `0x57EfC7cE5250C96B0b0E7C554c9d9743A18b794f` (Robinhood Chain mainnet, chainId 4663)_
 
 This document is an **internal security review** of the Primehod contracts. It is
 an engineering review with reproducible tests, not a paid third-party firm audit.
@@ -141,6 +141,26 @@ stored but unused (a leftover from the removed DEX-seeding path — not a backdo
 - **No third-party firm audit yet.** This is an internal review. For large TVL a
   professional audit is recommended before relying on it heavily.
 
+### Uniswap v3 venue (added 2026-07-05)
+
+Launches can now target a Uniswap v3 pool instead of the curve. Security posture:
+
+- The v3 stack used (factory `0x1f7d…2EfA`, position manager `0x7399…E0D3`,
+  SwapRouter02 `0xCaf6…5cb2`, chain-native aeWETH proxy) was **audited against the
+  canonical Ethereum mainnet bytecode**: identical modulo compiler metadata and
+  per-chain immutable addresses, with standard fee tiers, and all three contracts
+  cross-referencing each other correctly.
+- The LP position NFT is held by `PrimehodV3Locker`, which has **no function that
+  can move the NFT or decrease liquidity** — fees can only be collected and split
+  55/45 between the immutable creator and platform addresses.
+- Verified end-to-end on a fork of the live chain (`scripts/testV3Launch.ts`):
+  single-sided launch, locked position, buys/sells through the public router, fee
+  split, and the absence of any withdrawal path.
+- Trust notes: the external v3 factory owner can only enable new fee tiers; WETH is
+  the chain owner's upgradeable canonical wrapper (the same trust as the chain itself).
+  M-2 (exit liquidity) applies to the curve venue; a v3 pool's exit liquidity follows
+  standard Uniswap v3 mechanics.
+
 ## Reproduce
 
 ```bash
@@ -148,7 +168,8 @@ cd contracts
 npm install
 npx hardhat run scripts/testPrimehodCurve.ts     # behaviour + graduation
 npx hardhat run scripts/auditAdversarial.ts       # attack paths must all hold
+FORK_URL=<rpc> npx hardhat run scripts/testV3Launch.ts   # v3 venue, on a chain fork
 ```
 
 Verify the live factory on the
-[Robinhood Chain explorer](https://robinhoodchain.blockscout.com/address/0x5ae4eF8726Bb721735eEc32e40E0c103679f1DA2).
+[Robinhood Chain explorer](https://robinhoodchain.blockscout.com/address/0x57EfC7cE5250C96B0b0E7C554c9d9743A18b794f).
