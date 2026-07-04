@@ -25,6 +25,10 @@ const config: HardhatUserConfig = {
     },
   },
   networks: {
+    // FORK_URL lets tests run against a fork of the live chain (real Uniswap v3).
+    hardhat: process.env.FORK_URL
+      ? { forking: { url: process.env.FORK_URL } }
+      : {},
     // Primehod production network: Robinhood Chain mainnet.
     "robinhood-mainnet": {
       url: ROBINHOOD_MAINNET_RPC,
