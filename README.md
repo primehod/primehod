@@ -13,8 +13,8 @@ Launch a token in one transaction, trade it instantly on an on-chain bonding cur
 ## How it works
 
 1. **Launch.** One transaction deploys your token, its vesting contract, and its market. Supply is fully minted at creation: no mint function, no pause, no blacklist, no owner.
-2. **Trade.** 80% of supply goes straight onto an ETH constant-product bonding curve. Anyone can buy or sell from block one; the curve is always liquid.
-3. **Graduate.** Each launch picks a graduation cap ($5k, $10k, or $20k). Reaching the cap marks the token as graduated; trading stays open on the curve rather than halting, so there is no forced lock-up.
+2. **Pick your market.** The **Primehod Curve** is an ETH constant-product bonding curve with a dynamic 1-5% anti-sniper fee — it trades on primehod.lol only. A **Uniswap v3 pool** puts the supply into a public pool (fixed 1% fee) as single-sided liquidity locked forever, tradeable by every wallet, bot, and aggregator from the first block and indexed by DEX trackers within minutes.
+3. **Graduate (curve venue).** Each curve launch picks a graduation cap ($5k, $10k, or $20k). Reaching the cap marks the token as graduated; trading stays open on the curve rather than halting, so there is no forced lock-up.
 
 ## Why it is fair
 
@@ -31,15 +31,16 @@ Launch a token in one transaction, trade it instantly on an on-chain bonding cur
 | `PrimehodToken` | Fixed-supply ERC-20, fully minted at launch, zero admin |
 | `PrimehodVesting` | Immutable monthly creator vesting (1% per month) |
 | `PrimehodCurve` | ETH constant-product bonding curve with dynamic fee and 55/45 fee split |
-| `PrimehodFactory` | One-transaction launch of token + vesting + curve |
+| `PrimehodFactory` | One-transaction launch of token + vesting + market (curve or v3 pool) |
+| `PrimehodV3Locker` | Holds a v3 launch's LP NFT forever; only collects and splits fees 55/45 |
 
 Factory (Robinhood Chain mainnet, chainId 4663):
 
 ```
-0x5ae4eF8726Bb721735eEc32e40E0c103679f1DA2
+0x57EfC7cE5250C96B0b0E7C554c9d9743A18b794f
 ```
 
-Verify it on the [Robinhood Chain explorer](https://robinhoodchain.blockscout.com/address/0x5ae4eF8726Bb721735eEc32e40E0c103679f1DA2).
+Verify it on the [Robinhood Chain explorer](https://robinhoodchain.blockscout.com/address/0x57EfC7cE5250C96B0b0E7C554c9d9743A18b794f).
 
 ## Robinhood Chain
 
