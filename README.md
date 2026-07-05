@@ -8,7 +8,7 @@ Primehod is the token launchpad on **Robinhood Chain**, live on mainnet at **[pr
 
 Launch a token in one transaction, trade it instantly on an on-chain bonding curve, and graduate when the community carries it to its cap. No presale, no allocation games, no admin keys over your liquidity.
 
-**Website:** [primehod.lol](https://primehod.lol) · **X:** [@primehodl](https://x.com/primehodl)
+**Website:** [primehod.lol](https://primehod.lol) · **X:** [@Primehod](https://x.com/Primehod)
 
 ## How it works
 
